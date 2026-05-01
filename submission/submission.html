@@ -2,83 +2,661 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Joel</title>
+  <title>Super Gę</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
 
-  <style type="text/css">
-    html,
-    body {
+  <style>
+    html, body {
       background: transparent;
       margin: 0;
       padding: 0;
+      overflow: hidden;
       font-family: sans-serif;
     }
 
     #overlay-container {
       width: 960px;
       height: 540px;
+      position: relative;
     }
 
-    /* Your style here... (feel free to remove this example styling) */
-    #skip {
-      display: none; /* Hidden until ad starts */
+    #goose {
       position: absolute;
-      bottom: 60px;
-      right: 0;
-      padding: 10px 18px;
-      background: rgba(0, 0, 0, 0.6);
-      border: 1px solid black;
-      border-right-width: 0;
-      font-size: 1.2rem;
-      border-radius: 4px 0 0 4px;
+      image-rendering: pixelated;
+      pointer-events: none;
+      display: none;
+      /* mirror via JS-set transform; origin must stay at top-left so our
+         coordinate math stays simple — we compensate in beakPos() instead */
+      transform-origin: top left;
+    }
+
+    #skip {
+      display: none;
+      position: absolute;
+      padding: 4px 10px;
+      background: rgba(185, 22, 22, 0.9);
+      border: 1px solid rgba(255, 170, 170, 0.8);
+      font-size: 0.78rem;
+      border-radius: 3px;
       color: white;
       cursor: pointer;
+      user-select: none;
+      white-space: nowrap;
+      pointer-events: none; /* enabled only when catchable */
+      transition: box-shadow 0.15s;
+    }
+
+    #skip.catchable {
+      pointer-events: auto;
+      box-shadow: inset 0 0 0 1px rgba(255, 230, 120, 0.95);
+    }
+
+    #hint {
+      position: absolute;
+      bottom: 12px;
+      left: 50%;
+      transform: translateX(-50%);
+      color: rgba(255, 255, 255, 0.75);
+      font-size: 0.82rem;
+      pointer-events: none;
+      display: none;
+      text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+    }
+
+    .honk {
+      position: absolute;
+      pointer-events: none;
+      font-size: 2rem;
+      font-weight: 900;
+      color: #ff2222;
+      text-shadow: 0 0 6px rgba(0,0,0,0.9), 1px 1px 0 #000;
+      white-space: nowrap;
+      will-change: transform, opacity;
     }
   </style>
 </head>
 
 <body>
   <div id="overlay-container">
-    <!-- We've added a sample button. Feel free to remove it: -->
-    <button id="skip">
-      Skip Ad...
-    </button>
+    <img id="goose" src="" alt="">
+    <button id="skip">Skip Ad ▶</button>
+    <div id="hint">Get close and she snatches it. Chase carefully.</div>
   </div>
 
-  <script type="text/javascript">
-    (function(window, document){
-      // This is how you tell the parent window that the ad was successfully skipped.
-      function adSuccess() {
-        window.top.postMessage({ type: 'success' }, '*');
+  <script>
+  (function(w, d) {
+    'use strict';
+
+    function setPlaybackRate(rate) {
+      w.top.postMessage({ type: 'setPlaybackRate', value: rate }, '*');
+    }
+
+    function adSuccess() {
+      setPlaybackRate(1);
+      w.top.postMessage({ type: 'success' }, '*');
+    }
+
+    function adFail() {
+      setPlaybackRate(1);
+      w.top.postMessage({ type: 'fail' }, '*');
+    }
+
+    const gooseEl = d.getElementById('goose');
+    const skipBtn = d.getElementById('skip');
+    const hintEl  = d.getElementById('hint');
+    const container = d.getElementById('overlay-container');
+    const honkAudio = new Audio('assets/HONK.mp3');
+    honkAudio.preload = 'auto';
+
+    function playHonkSound() {
+      const sfx = honkAudio.cloneNode();
+      sfx.volume = 0.95;
+      sfx.play().catch(() => {});
+    }
+
+    const W = 960, H = 540;
+    const SCALE = 1;           // render sprites at 1× (128 × 128 px)
+    const SPRITE_SIZE = 128;   // source image px (square)
+    const SW = SPRITE_SIZE * SCALE; // 128
+    const SH = SPRITE_SIZE * SCALE; // 128
+
+    /* ---- frame groups (1-based file numbers) ---- */
+    const FRAMES = {
+      idle:     [1, 2, 3],
+      agitated: [4, 5, 6, 7],
+      grab:     [8, 9],
+      run:      [10, 11, 12, 13, 14]
+    };
+    const FRAME_MS = { idle: 260, agitated: 105, grab: 140, run: 65 };
+
+    /* Beak position in SOURCE sprite pixels, left-facing orientation */
+    const BEAK = {
+      grab: { x: 15, y: 32 },
+      run:  { x: 10, y: 32 }
+    };
+
+    /* ---- preload all sprites ---- */
+    const imgs = {};
+    let spriteReady = false;
+    let loadCount = 0;
+    for (let i = 1; i <= 14; i++) {
+      const img = new Image();
+      img.onload = () => { if (++loadCount === 14) spriteReady = true; };
+      img.src = 'assets/super-ge' + i + '.png';
+      imgs[i] = img;
+    }
+
+    /* ---- state machine ---- */
+    const S = { IDLE: 0, AGITATED: 1, GRAB: 2, RUN: 3 };
+    let state = S.IDLE;
+
+    /* goose top-left corner in container coords */
+    let gx = 0, gy = 0;
+
+    /* true  = original orientation (faces LEFT, beak on left side)
+       false = mirrored            (faces RIGHT, beak on right side) */
+    let facingLeft = true;
+
+    let runVX = 0;
+    let runVY = 0;
+    let pendingDir = 1;   // horizontal flee direction: +1 = right, -1 = left
+    let orbitAngle = 0;
+    let orbitDir = 1;
+    let borderBlocked = false;
+    let facingAccum = 0;  // accumulated horizontal travel for hysteresis
+    let agitatedPendingRun = false;  // run was requested but waiting for anim cycle end
+    let agitatedPendingDir = 1;
+    let agitatedCycleComplete = false; // true once first full cycle finishes
+    let slowWarnHonkPlayed = false; // one-shot warning honk for very slow approach
+    let panicSingleHonkRun = false; // panic path: honk once, then immediately run
+
+    /* animation */
+    let frameGroup = 'idle';
+    let frameIdx   = 0;
+    let lastFrameT = 0;
+
+    /* mouse */
+    let mx = -999, my = -999;
+    let prevMx = -999, prevMy = -999;
+    let mouseVX = 0, mouseVY = 0;
+    let mouseSpeed = 0;
+    let approachSpeedSmooth = 0;
+
+    /* ---- tuning constants ---- */
+    const AGITATED_DIST     = 220; // px from beak → enter agitated
+    const GRAB_DIST         = 170; // px from beak → instantly grab button
+    const CATCH_DIST        = 28;  // very close click window
+    const CATCH_SPEED       = 0.55;// must move very slowly to click
+    const EVADE_RADIUS      = 145; // desired beak distance from cursor
+    const EVADE_MIN_SPEED   = 12;  // always faster baseline
+    const EVADE_SPEED_MULT  = 1.65;// scales above cursor speed
+    const RELEASE_DIST      = 300; // if cursor retreats far away, calm down
+    const WALL_EPS          = 0.5; // edge tolerance for wall/corner handling
+    const STILL_SPEED       = 0.28;// cursor considered almost still
+    const WALL_REPEL_DIST   = 26;  // start pushing away from walls before contact
+    const SPRITE_BOUNDS     = { left: 3, right: 109, top: 20, bottom: 108 };
+    const APPROACH_SCARE    = 0.6; // very slight approach triggers agitated
+    const APPROACH_RUN      = 2.0; // while agitated: this speed triggers grab+run
+    const APPROACH_RUN_PANIC= 3.0; // skip agitated entirely and run immediately
+    const APPROACH_CALM     = 0.2; // below this, goose calms back down
+    const APPROACH_WARN_MIN = 0.18; // very slow approach warning honk lower bound
+    const WARN_RESET_DIST   = 255;  // move farther than this to re-arm slow warning honk
+    const APPROACH_SMOOTH   = 0.34; // approach speed low-pass to reduce jitter spikes
+    const SCARE_MOUSE_MIN   = 1.05; // require non-trivial raw mouse speed before agitated
+
+    let active = false;
+
+    /* ---- helpers ---- */
+    function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+    function dist2d(ax, ay, bx, by) {
+      const dx = ax - bx, dy = ay - by;
+      return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    function gooseXBounds(forFacingLeft) {
+      const leftInset = SPRITE_BOUNDS.left * SCALE;
+      const rightInset = SPRITE_BOUNDS.right * SCALE;
+      if (forFacingLeft) {
+        return { min: -leftInset, max: W - rightInset };
+      }
+      return { min: -SW + rightInset, max: W - SW + leftInset };
+    }
+
+    function gooseYBounds() {
+      const topInset = SPRITE_BOUNDS.top * SCALE;
+      const bottomInset = SPRITE_BOUNDS.bottom * SCALE;
+      return { min: -topInset, max: H - bottomInset };
+    }
+
+    function clampGoosePos(x, y, forFacingLeft) {
+      const xb = gooseXBounds(forFacingLeft);
+      const yb = gooseYBounds();
+      return {
+        x: clamp(x, xb.min, xb.max),
+        y: clamp(y, yb.min, yb.max)
+      };
+    }
+
+    /* Returns the beak position in container coords for the current goose state */
+    function beakPos() {
+      const off = (frameGroup === 'run') ? BEAK.run : BEAK.grab;
+      if (facingLeft) {
+        // original orientation: beak.x counts from the left edge
+        return { x: gx + off.x * SCALE, y: gy + off.y * SCALE };
+      } else {
+        // mirrored (scaleX -1 around left edge → element shifted by SW):
+        // visual left edge is at gx + SW, decreasing as we go right.
+        // pixel at source x maps to visual x = gx + SW - x*SCALE
+        return { x: gx + SW - off.x * SCALE, y: gy + off.y * SCALE };
+      }
+    }
+
+    function setSprite(n) {
+      gooseEl.src = imgs[n].src;
+    }
+
+    function gooseFromBeak(beakX, beakY) {
+      const off = (frameGroup === 'run') ? BEAK.run : BEAK.grab;
+      const gyTarget = beakY - off.y * SCALE;
+      if (facingLeft) {
+        return { x: beakX - off.x * SCALE, y: gyTarget };
+      }
+      return { x: beakX - (SW - off.x * SCALE), y: gyTarget };
+    }
+
+    function spawnHonk() {
+      playHonkSound();
+      const el = d.createElement('div');
+      el.className = 'honk';
+      el.textContent = 'HONK!';
+      /* Center horizontally over visible sprite content, above the visible top */
+      const contentCenterX = facingLeft
+        ? gx + (SPRITE_BOUNDS.left + SPRITE_BOUNDS.right) / 2 * SCALE
+        : gx + SW - (SPRITE_BOUNDS.left + SPRITE_BOUNDS.right) / 2 * SCALE;
+      const headX = Math.round(contentCenterX);
+      const headY = Math.round(gy + SPRITE_BOUNDS.top * SCALE);
+      el.style.left = headX + 'px';
+      el.style.top  = headY + 'px';
+      el.style.transform = 'translate(-50%, -100%)';
+      el.style.opacity = '1';
+      container.appendChild(el);
+
+      const drift = facingLeft ? -22 : 22;
+      const startT = performance.now();
+      const dur = 700;
+      (function animHonk(t) {
+        const p = Math.min((t - startT) / dur, 1);
+        el.style.top     = (headY - p * 38) + 'px';
+        el.style.left    = (headX + drift * p) + 'px';
+        el.style.opacity = (1 - p).toFixed(3);
+        if (p < 1) requestAnimationFrame(animHonk);
+        else el.remove();
+      })(startT);
+    }
+
+    function updateGooseDOM() {
+      const drawX = Math.round(gx);
+      const drawY = Math.round(gy);
+      gooseEl.style.width  = SW + 'px';
+      gooseEl.style.height = SH + 'px';
+      if (facingLeft) {
+        gooseEl.style.left      = drawX + 'px';
+        gooseEl.style.transform = 'none';
+      } else {
+        /* scaleX(-1) around the left edge: shift right by SW then flip */
+        gooseEl.style.left      = (drawX + SW) + 'px';
+        gooseEl.style.transform = 'scaleX(-1)';
+      }
+      gooseEl.style.top = drawY + 'px';
+    }
+
+    function updateButtonDOM() {
+      const beak = beakPos();
+      const bw = skipBtn.offsetWidth  || 84;
+      const bh = skipBtn.offsetHeight || 24;
+      const leftCandidate  = beak.x - bw - 2;
+      const rightCandidate = beak.x + 2;
+      const leftFits  = leftCandidate >= 0;
+      const rightFits = rightCandidate + bw <= W;
+
+      let bx;
+      if (facingLeft) {
+        bx = leftFits ? leftCandidate : rightCandidate;
+      } else {
+        bx = rightFits ? rightCandidate : leftCandidate;
       }
 
-      const skipButton = document.getElementById('skip');
+      if (!leftFits && !rightFits) {
+        bx = beak.x - bw / 2;
+      }
 
-      // Listen for messages from the game shell
-      window.addEventListener('message', (event) => {
-        if (!event.data || !event.data.type) return;
+      let by;
+      by = beak.y - bh / 2;
+      skipBtn.style.left   = clamp(bx, 0, W - bw) + 'px';
+      skipBtn.style.top    = clamp(by, 0, H - bh) + 'px';
+      skipBtn.style.right  = 'auto';
+      skipBtn.style.bottom = 'auto';
+    }
 
-        if (event.data.type === 'adStarted') {
-          // Show the skip button when the ad starts
-          skipButton.style.display = 'block';
+    /* ---- state transitions ---- */
+    function enterIdle() {
+      state = S.IDLE;
+      frameGroup = 'idle';
+      frameIdx = 0;
+      panicSingleHonkRun = false;
+      setSprite(FRAMES.idle[0]);
+    }
+
+    function enterAgitated() {
+      if (state === S.AGITATED) return;
+      state = S.AGITATED;
+      frameGroup = 'agitated';
+      frameIdx = 0;
+      agitatedPendingRun = false;
+      agitatedCycleComplete = false;
+      setSprite(FRAMES.agitated[0]);
+    }
+
+    function enterGrab(dir) {
+      state = S.GRAB;
+      frameGroup = 'grab';
+      frameIdx = 0;
+      pendingDir = dir;
+      const beak = beakPos();
+      orbitAngle = Math.atan2(beak.y - my, beak.x - mx);
+      orbitDir = (mouseSpeed > 1.2) ? 1 : -1;
+      setSprite(FRAMES.grab[0]);
+    }
+
+    function enterRun() {
+      state = S.RUN;
+      frameGroup = 'run';
+      frameIdx = 0;
+      borderBlocked = false;
+      facingAccum = 0;
+      runVX = pendingDir * EVADE_MIN_SPEED;
+      runVY = 0;
+      facingLeft = (pendingDir < 0); /* running left → face left (original sprite) */
+      setSprite(FRAMES.run[0]);
+    }
+
+    /* ---- main loop ---- */
+    function tick(now) {
+      if (!active) { requestAnimationFrame(tick); return; }
+
+      /* update mouse speed (px per frame at ~60 fps) */
+      if (prevMx > -900) {
+        mouseVX = mx - prevMx;
+        mouseVY = my - prevMy;
+        mouseSpeed = Math.sqrt(mouseVX * mouseVX + mouseVY * mouseVY);
+      } else {
+        mouseVX = 0;
+        mouseVY = 0;
+        mouseSpeed = 0;
+      }
+      prevMx = mx;
+      prevMy = my;
+
+      const beak = beakPos();
+      const d    = dist2d(mx, my, beak.x, beak.y);
+      const invD = 1 / Math.max(0.001, d);
+      const toBeakX = (beak.x - mx) * invD;
+      const toBeakY = (beak.y - my) * invD;
+      const approachSpeed = mouseVX * toBeakX + mouseVY * toBeakY;
+      approachSpeedSmooth += (approachSpeed - approachSpeedSmooth) * APPROACH_SMOOTH;
+      const approach = approachSpeedSmooth;
+      const canClick = true;
+      skipBtn.classList.toggle('catchable', canClick);
+      skipBtn.style.pointerEvents = canClick ? 'auto' : 'none';
+
+      /* ---- state logic ---- */
+      if (state === S.IDLE || state === S.AGITATED) {
+        const veryClose    = d < GRAB_DIST;
+        const somewhatClose = d < AGITATED_DIST;
+        const dir = (mx < beak.x) ? 1 : -1;
+
+        if (d > WARN_RESET_DIST) {
+          slowWarnHonkPlayed = false;
         }
 
-        // By default, if the user doesn't "skip" the ad before the video ends,
-        // we call fail to restart. You're welcome to replace this with a survey
-        // or other interaction instead (see examples/survey).
-        if (event.data.type === 'adFinished') {
-          skipButton.style.display = 'none';
-          window.top.postMessage({ type: 'fail' }, '*');
+        if (
+          state === S.IDLE &&
+          somewhatClose &&
+          approach >= APPROACH_WARN_MIN &&
+          approach < APPROACH_SCARE &&
+          !slowWarnHonkPlayed
+        ) {
+          /* Very slow approach: one warning honk only, no agitated/run */
+          slowWarnHonkPlayed = true;
+          spawnHonk();
         }
-      });
 
-      // Your ad overlay code goes here, we've added a simple example below:
-      skipButton.addEventListener('click', () => {
-        skipButton.style.display = 'none';
-        adSuccess();
-      });
+        if (approachSpeed >= APPROACH_RUN_PANIC && veryClose) {
+          /* Cursor lunged too fast — play one honk, then run immediately after */
+          panicSingleHonkRun = true;
+          agitatedPendingRun = false;
+          agitatedPendingDir = dir;
+          enterAgitated();
 
-    })(window, document);
+        } else if (state === S.AGITATED && veryClose && approach >= APPROACH_RUN) {
+          /* Queue the run; it fires when the current agitated cycle finishes */
+          agitatedPendingRun = true;
+          agitatedPendingDir = dir;
+
+        } else if ((veryClose || somewhatClose) && approach >= APPROACH_SCARE && mouseSpeed >= SCARE_MOUSE_MIN) {
+          enterAgitated();
+
+        } else if (state === S.AGITATED && d >= AGITATED_DIST && agitatedCycleComplete) {
+          /* Cursor moved far away — calm down (only after at least one full cycle) */
+          agitatedPendingRun = false;
+          enterIdle();
+
+        } else if (state === S.AGITATED && approach <= APPROACH_CALM && !agitatedPendingRun && agitatedCycleComplete) {
+          /* Cursor stopped approaching — calm down (only after at least one full cycle) */
+          enterIdle();
+        }
+      }
+
+      if (state === S.RUN) {
+        if (d > RELEASE_DIST) {
+          enterIdle();
+        } else {
+          const evadeSpeed = Math.max(EVADE_MIN_SPEED, mouseSpeed * EVADE_SPEED_MULT);
+          const r = Math.max(0.001, d);
+
+          /* Unit vectors based on cursor->beak direction */
+          const awayX = (beak.x - mx) / r;
+          const awayY = (beak.y - my) / r;
+          const tangentX = -awayY * orbitDir;
+          const tangentY =  awayX * orbitDir;
+
+          const cursorStillness = clamp((mouseSpeed - STILL_SPEED) / 1.2, 0, 1);
+          const radiusError = Math.abs(r - EVADE_RADIUS);
+          const nearRadius = clamp(1 - radiusError / 28, 0, 1);
+
+          /* Never move inward: radial component is only outward or zero. */
+          const tooClose = Math.max(0, EVADE_RADIUS - r);
+          const radialWeight = clamp(tooClose / EVADE_RADIUS + 0.16, 0, 1);
+          const tangentialWeight = Math.max(0.08, cursorStillness) * (1 - nearRadius * 0.7);
+
+          /* If mouse is very still and goose already holds radius, nearly freeze orbit. */
+          if (mouseSpeed < STILL_SPEED && r >= EVADE_RADIUS - 4 && r <= EVADE_RADIUS + 8) {
+            runVX = 0;
+            runVY = 0;
+            if (d > RELEASE_DIST) enterIdle();
+            requestAnimationFrame(tick);
+            return;
+          }
+
+          let vx = (awayX * radialWeight + tangentX * tangentialWeight) * evadeSpeed;
+          let vy = (awayY * radialWeight + tangentY * tangentialWeight) * evadeSpeed;
+
+          /* Continuous wall repulsion avoids lingering in corners even before clamp hits. */
+          const xBounds = gooseXBounds(facingLeft);
+          const yBounds = gooseYBounds();
+          const leftGap = gx - xBounds.min;
+          const rightGap = xBounds.max - gx;
+          const topGap = gy - yBounds.min;
+          const bottomGap = yBounds.max - gy;
+
+          const repelLeft = clamp((WALL_REPEL_DIST - leftGap) / WALL_REPEL_DIST, 0, 1);
+          const repelRight = clamp((WALL_REPEL_DIST - rightGap) / WALL_REPEL_DIST, 0, 1);
+          const repelTop = clamp((WALL_REPEL_DIST - topGap) / WALL_REPEL_DIST, 0, 1);
+          const repelBottom = clamp((WALL_REPEL_DIST - bottomGap) / WALL_REPEL_DIST, 0, 1);
+
+          const wallPushX = (repelLeft - repelRight) * evadeSpeed * 1.35;
+          const wallPushY = (repelTop - repelBottom) * evadeSpeed * 1.35;
+          vx += wallPushX;
+          vy += wallPushY;
+          const vLen = Math.sqrt(vx * vx + vy * vy) || 1;
+          vx = (vx / vLen) * evadeSpeed;
+          vy = (vy / vLen) * evadeSpeed;
+
+          let nextX = gx + vx;
+          let nextY = gy + vy;
+          const clampedX = clamp(nextX, xBounds.min, xBounds.max);
+          const clampedY = clamp(nextY, yBounds.min, yBounds.max);
+          borderBlocked = (Math.abs(clampedX - nextX) > 0.001 || Math.abs(clampedY - nextY) > 0.001);
+
+          if (borderBlocked) {
+            orbitDir *= -1;
+            orbitAngle += orbitDir * 0.35;
+
+            /* Extra corner/wall escape: slide along walls while still favoring away-from-cursor. */
+            let wallX = 0;
+            let wallY = 0;
+            if (gx <= xBounds.min + WALL_EPS) wallX = 1;
+            else if (gx >= xBounds.max - WALL_EPS) wallX = -1;
+            if (gy <= yBounds.min + WALL_EPS) wallY = 1;
+            else if (gy >= yBounds.max - WALL_EPS) wallY = -1;
+
+            const inCorner = (wallX !== 0 && wallY !== 0);
+            const cornerBoost = inCorner ? 1.5 : 1.0;
+            let ex = awayX * 0.8 + wallX * 1.45 * cornerBoost + (-awayY * orbitDir) * 0.7;
+            let ey = awayY * 0.8 + wallY * 1.45 * cornerBoost + ( awayX * orbitDir) * 0.7;
+            const eLen = Math.sqrt(ex * ex + ey * ey) || 1;
+            ex = (ex / eLen) * evadeSpeed;
+            ey = (ey / eLen) * evadeSpeed;
+
+            nextX = clamp(gx + ex, xBounds.min, xBounds.max);
+            nextY = clamp(gy + ey, yBounds.min, yBounds.max);
+            vx = nextX - gx;
+            vy = nextY - gy;
+          } else {
+            nextX = clampedX;
+            nextY = clampedY;
+            vx = nextX - gx;
+            vy = nextY - gy;
+          }
+
+          gx = clamp(nextX, xBounds.min, xBounds.max);
+          gy = clamp(nextY, yBounds.min, yBounds.max);
+          runVX = vx;
+          runVY = vy;
+
+          /* Hysteresis: only flip facing after 18px of sustained travel in new direction. */
+          facingAccum += runVX;
+          if (facingAccum > 18) { facingLeft = false; facingAccum = 0; }
+          else if (facingAccum < -18) { facingLeft = true; facingAccum = 0; }
+          else if (runVX * (facingLeft ? -1 : 1) < 0) { facingAccum *= 0.7; }
+
+          /* Re-clamp after facing flip because horizontal bounds differ when mirrored. */
+          const fixed = clampGoosePos(gx, gy, facingLeft);
+          gx = fixed.x;
+          gy = fixed.y;
+        }
+      }
+
+      /* ---- sprite animation ---- */
+      if (now - lastFrameT > FRAME_MS[frameGroup]) {
+        lastFrameT = now;
+        const group = FRAMES[frameGroup];
+        const prevIdx = frameIdx;
+        frameIdx = (frameIdx + 1) % group.length;
+        setSprite(group[frameIdx]);
+
+        /* Agitated frame 7 (index 3) — spawn HONK */
+        if (frameGroup === 'agitated' && frameIdx === 3) {
+          spawnHonk();
+          if (panicSingleHonkRun) {
+            panicSingleHonkRun = false;
+            enterGrab(agitatedPendingDir);
+          }
+        }
+
+        /* Agitated cycle just wrapped — mark complete, maybe run */
+        if (frameGroup === 'agitated' && frameIdx === 0) {
+          agitatedCycleComplete = true;
+          if (agitatedPendingRun) {
+            agitatedPendingRun = false;
+            enterGrab(agitatedPendingDir);
+          }
+        }
+
+        /* at the last grab frame, start running */
+        if (frameGroup === 'grab' && frameIdx === group.length - 1) {
+          enterRun();
+        }
+      }
+
+      updateGooseDOM();
+      updateButtonDOM();
+
+      requestAnimationFrame(tick);
+    }
+
+    /* ---- input ---- */
+    container.addEventListener('mousemove', (e) => {
+      const rect = container.getBoundingClientRect();
+      mx = e.clientX - rect.left;
+      my = e.clientY - rect.top;
+    });
+
+    skipBtn.addEventListener('click', () => {
+      active = false;
+      gooseEl.style.display = 'none';
+      skipBtn.style.display = 'none';
+      hintEl.style.display  = 'none';
+      adSuccess();
+    });
+
+    /* ---- game shell messages ---- */
+    w.addEventListener('message', (e) => {
+      if (!e.data || !e.data.type) return;
+
+      if (e.data.type === 'adStarted') {
+        setPlaybackRate(0.25);
+        const go = () => {
+          if (!spriteReady) { setTimeout(go, 50); return; }
+          /* start goose at bottom-right, facing left (toward the video) */
+          gx = W - SW - 10;
+          gy = H - SH - 12;
+          facingLeft = true;
+          const start = clampGoosePos(gx, gy, facingLeft);
+          gx = start.x;
+          gy = start.y;
+          enterIdle();
+          gooseEl.style.display = 'block';
+          skipBtn.style.display = 'block';
+          hintEl.style.display  = 'block';
+          active = true;
+        };
+        go();
+      }
+
+      if (e.data.type === 'adFinished') {
+        active = false;
+        gooseEl.style.display = 'none';
+        skipBtn.style.display = 'none';
+        hintEl.style.display  = 'none';
+        adFail();
+      }
+    });
+
+    requestAnimationFrame(tick);
+
+  })(window, document);
   </script>
 </body>
 </html>
