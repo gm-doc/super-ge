@@ -51,64 +51,6 @@
       box-shadow: inset 0 0 0 1px rgba(255, 230, 120, 0.95);
     }
 
-    #speed-control {
-      position: absolute;
-      bottom: 10px;
-      right: 10px;
-      display: none;
-      align-items: center;
-      gap: 6px;
-      background: rgba(0,0,0,0.55);
-      border: 1px solid rgba(255,255,255,0.15);
-      border-radius: 4px;
-      padding: 4px 8px;
-      pointer-events: auto;
-      user-select: none;
-    }
-
-    #speed-control label {
-      color: rgba(255,255,255,0.8);
-      font-size: 0.72rem;
-      white-space: nowrap;
-    }
-
-    #speed-slider {
-      -webkit-appearance: none;
-      appearance: none;
-      width: 80px;
-      height: 4px;
-      border-radius: 2px;
-      background: rgba(255,255,255,0.25);
-      outline: none;
-      cursor: pointer;
-    }
-
-    #speed-slider::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      appearance: none;
-      width: 12px;
-      height: 12px;
-      border-radius: 50%;
-      background: rgba(255,255,255,0.9);
-      cursor: pointer;
-    }
-
-    #speed-slider::-moz-range-thumb {
-      width: 12px;
-      height: 12px;
-      border-radius: 50%;
-      background: rgba(255,255,255,0.9);
-      border: none;
-      cursor: pointer;
-    }
-
-    #speed-label {
-      color: rgba(255,255,255,0.9);
-      font-size: 0.72rem;
-      min-width: 30px;
-      text-align: right;
-    }
-
     .honk {
       position: absolute;
       pointer-events: none;
@@ -126,48 +68,29 @@
   <div id="overlay-container">
     <img id="goose" src="" alt="">
     <button id="skip">Skip Ad ▶</button>
-    <div id="speed-control">
-      <label for="speed-slider">Video Speed</label>
-      <input id="speed-slider" type="range" min="0.1" max="2" step="0.05" value="0.25">
-      <span id="speed-label">0.25x</span>
-    </div>  </div>
+  </div>
 
   <script>
   (function(w, d) {
     'use strict';
 
-    function setPlaybackRate(rate) {
-      w.top.postMessage({ type: 'setPlaybackRate', value: rate }, '*');
-    }
-
     function adSuccess() {
-      setPlaybackRate(1);
       w.top.postMessage({ type: 'success' }, '*');
     }
 
     function adFail() {
-      setPlaybackRate(1);
       w.top.postMessage({ type: 'fail' }, '*');
     }
 
     const gooseEl = d.getElementById('goose');
     const skipBtn = d.getElementById('skip');
     const container = d.getElementById('overlay-container');
-    const speedControl = d.getElementById('speed-control');
-    const speedSlider  = d.getElementById('speed-slider');
-    const speedLabel   = d.getElementById('speed-label');
-
-    speedSlider.addEventListener('input', () => {
-      const rate = parseFloat(speedSlider.value);
-      speedLabel.textContent = rate.toFixed(2) + 'x';
-      setPlaybackRate(rate);
-    });
     const honkAudio = new Audio('assets/HONK.mp3');
     honkAudio.preload = 'auto';
 
     function playHonkSound() {
       const sfx = honkAudio.cloneNode();
-      sfx.volume = 0.95;
+      sfx.volume = 0.25;
       sfx.play().catch(() => {});
     }
 
@@ -682,9 +605,6 @@
       if (!e.data || !e.data.type) return;
 
       if (e.data.type === 'adStarted') {
-        setPlaybackRate(0.25);
-        speedSlider.value = '0.25';
-        speedLabel.textContent = '0.25x';
         const go = () => {
           if (!spriteReady) { setTimeout(go, 50); return; }
           /* start goose at bottom-right, facing left (toward the video) */
@@ -697,7 +617,6 @@
           enterIdle();
           gooseEl.style.display = 'block';
           skipBtn.style.display = 'block';
-          speedControl.style.display = 'flex';
           active = true;
         };
         go();
